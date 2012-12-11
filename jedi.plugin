@@ -1,0 +1,8 @@
+[Plugin]
+Loader=python
+Module=jediplugin
+IAge=3
+Name=Jedi
+Description=Python autocompletion for gedit via the jedi library.
+Authors=Luke Graybill
+Website=https://github.com/killarny/gedit-python-jedi
