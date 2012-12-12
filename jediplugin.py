@@ -15,13 +15,60 @@ class JediInstance(object):
     def __init__(self, plugin, window):
         self._window = window
         self._plugin = plugin
+        self._document = self._window.get_active_document()
+        self._handlers = []
+        self._handlers.append(self._document.connect(
+            'notify', self.on_notify))
 
     def deactivate(self):
+        for handler_id in self._handlers[:]:
+            self._document.disconnect(handler_id)
+            self._handlers.remove(handler_id)
         self._window = None
         self._plugin = None
 
+    def on_notify(self, document, *data):
+        if document != self._document:
+            raise ValueError("Document in signal doesn't match instance!")
+        self.show_completion()
+
     def selected(self):
-        pass
+        """This instance has just been selected.
+        """
+        self.show_completion()
+
+    def cursor_position(self):
+        """Returns the cursor position as a tuple.
+        """
+        g_iter = self._document.get_iter_at_mark(self._document.get_insert())
+        line = g_iter.get_line() + 1
+        col = g_iter.get_line_offset()
+        return line, col
+
+    def show_completion(self):
+        """Show the completion interface, if needed.
+        """
+        # if the document is untouched (not changed since last save),
+        ## then we don't need completion
+        if self._document.is_untouched():
+            return
+
+        # filepath of the document being edited
+        filepath = self._document.get_uri_for_display()
+
+        # get the source of the document
+        start, end = self._document.get_bounds()
+        source = self._document.get_text(start, end, False)
+
+        # find the cursor position
+        line, col = self.cursor_position()
+
+        # begin jedi mind-control tricks
+        script = jedi.Script(source, line, col, filepath)
+        completions = script.complete()
+        call_def = script.get_in_function_call()
+
+        # TODO: refine and display completions
 
 
 class JediPlugin(GObject.Object, Gedit.WindowActivatable):
@@ -63,10 +110,12 @@ class JediPlugin(GObject.Object, Gedit.WindowActivatable):
         document = window.get_active_document()
         completion = self._instances.get(window)
         if not completion:
-            if self.document_is_python(document):
+            if self.document_is_python(document) and \
+                    self.needs_completion(document):
                 completion = JediInstance(self, window)
                 self._instances[window] = completion
-        elif not self.document_is_python(document):
+        elif not self.document_is_python(document) or \
+                not self.needs_completion(document):
             self._instances[window].deactivate()
             del self._instances[window]
             return None
@@ -82,3 +131,12 @@ class JediPlugin(GObject.Object, Gedit.WindowActivatable):
             uri.endswith('.py') or uri.endswith('.pyw'):
                 return True
         return False
+
+    def needs_completion(self, document):
+        # if jedi didn't get imported, don't attempt completion
+        if not jedi:
+            return False
+        # if the document is readonly, don't bother with completion
+        if document.get_readonly():
+            return False
+        return True
