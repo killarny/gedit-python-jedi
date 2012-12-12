@@ -8,15 +8,6 @@ except ImportError:
 
 DEBUG = False
 
-def document_is_python(document):
-    if not document:
-        return False
-    uri = str(document.get_uri_for_display())
-    if document.get_mime_type() == 'text/x-python' or \
-        uri.endswith('.py') or uri.endswith('.pyw'):
-            return True
-    return False
-
 
 class JediInstance(object):
     _title = "Jedi"
@@ -28,6 +19,9 @@ class JediInstance(object):
     def deactivate(self):
         self._window = None
         self._plugin = None
+
+    def selected(self):
+        pass
 
 
 class JediPlugin(GObject.Object, Gedit.WindowActivatable):
@@ -60,22 +54,31 @@ class JediPlugin(GObject.Object, Gedit.WindowActivatable):
             del self._instances[window]
 
     def on_active_tab_changed(self, window, tab, data=None):
-        self.update_completion(window)
+        self.select_completion(window)
 
     def on_active_tab_state_changed(self, window, data=None):
-        self.update_completion(window)
+        self.select_completion(window)
 
-    def update_completion(self, window):
+    def select_completion(self, window):
         document = window.get_active_document()
         completion = self._instances.get(window)
         if not completion:
-            if document_is_python(document):
+            if self.document_is_python(document):
                 completion = JediInstance(self, window)
                 self._instances[window] = completion
-        elif not document_is_python(document):
+        elif not self.document_is_python(document):
             self._instances[window].deactivate()
             del self._instances[window]
             return None
         if completion:
-            completion.update()
+            completion.selected()
         return completion
+
+    def document_is_python(self, document):
+        if not document:
+            return False
+        uri = str(document.get_uri_for_display())
+        if document.get_mime_type() == 'text/x-python' or \
+            uri.endswith('.py') or uri.endswith('.pyw'):
+                return True
+        return False
