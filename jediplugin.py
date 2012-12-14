@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from gi.repository import GObject, Gedit
+from gi.repository import Gtk, GObject, Gedit
 try:
     import jedi
 except ImportError:
@@ -16,9 +16,12 @@ class JediInstance(object):
         self._window = window
         self._plugin = plugin
         self._document = self._window.get_active_document()
+        self._view = Gedit.Tab.get_from_document(self._document).get_view()
         self._handlers = []
-        self._handlers.append(self._document.connect(
-            'notify', self.on_notify))
+        self._handlers.append(
+            self._document.connect('notify', self.on_notify))
+        self._handlers.append(
+            self._view.connect('key-press-event', self.on_view_keypress))
 
     def deactivate(self):
         for handler_id in self._handlers[:]:
@@ -28,14 +31,30 @@ class JediInstance(object):
         self._plugin = None
 
     def on_notify(self, document, *data):
+        """The document has changed in some way. (Loaded, edited, etc)
+        """
         if document != self._document:
             raise ValueError("Document in signal doesn't match instance!")
-        self.show_completion()
+        # TODO: show completions in a non-annoying manner (wait for ctrl-space?)
+
+    def on_view_keypress(self, view, event):
+        """User pressed a key in the document.
+        """
+#        if view != self._view:
+#            raise ValueError("View in signal doesn't match instance!")
+        char = unicode(event.string)
+        # don't complete when pasting text
+        if len(char) > 1:
+            return
+        # only trigger completions on a dot(.)
+        if char == u'.':
+            self.show_completion()
 
     def selected(self):
         """This instance has just been selected.
         """
-        self.show_completion()
+        # TODO: show completions in a non-annoying manner (wait for ctrl-space?)
+        pass
 
     def cursor_position(self):
         """Returns the cursor position as a tuple.
@@ -44,6 +63,19 @@ class JediInstance(object):
         line = g_iter.get_line() + 1
         col = g_iter.get_line_offset()
         return line, col
+
+    def cursor_coords(self, convert_to_window=True):
+        """Returns the cursor coords as a tuple.
+
+        Convert relative to window if convert_to_window is specified.
+        """
+        g_iter = self._document.get_iter_at_mark(self._document.get_insert())
+        rect = self._view.get_iter_location(g_iter)
+        if convert_to_window:
+            x, y = self._view.buffer_to_window_coords(
+                Gtk.TextWindowType.WIDGET, rect.x, rect.y)
+            return self._view.translate_coordinates(self._window, x, y)
+        return rect.x, rect.y
 
     def show_completion(self):
         """Show the completion interface, if needed.
@@ -65,9 +97,15 @@ class JediInstance(object):
 
         # begin jedi mind-control tricks
         script = jedi.Script(source, line, col, filepath)
-        completions = script.complete()
         call_def = script.get_in_function_call()
+        completions = script.complete()
 
+        # bail out if there aren't any completions to show
+        if not completions:
+            return
+
+        # figure out where to display the completion window
+        cursor_x, cursor_y = self.cursor_coords()
         # TODO: refine and display completions
 
 
