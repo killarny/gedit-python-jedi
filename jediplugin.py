@@ -1,12 +1,136 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from gi.repository import Gtk, GObject, Gedit
+from gi.repository import GdkPixbuf, Gtk, GObject, Gedit
 try:
     import jedi
 except ImportError:
     jedi = None
 
 DEBUG = False
+
+
+class JediCompletion(object):
+    moduleIcon = Gtk.Window().render_icon(
+        Gtk.STOCK_COPY, Gtk.IconSize.MENU)
+    importIcon = Gtk.Window().render_icon(
+        Gtk.STOCK_JUMP_TO, Gtk.IconSize.MENU)
+    classIcon = Gtk.Window().render_icon(
+        Gtk.STOCK_FILE, Gtk.IconSize.MENU)
+    functionIcon = Gtk.Window().render_icon(
+        Gtk.STOCK_EXECUTE, Gtk.IconSize.MENU)
+    attributeIcon = Gtk.Window().render_icon(
+        Gtk.STOCK_COPY, Gtk.IconSize.MENU)
+
+    def __init__(self, jedi_completion):
+        self._jedi = jedi_completion
+
+    @property
+    def markup(self):
+        return self._jedi.word
+
+    @property
+    def jedi(self):
+        return self._jedi
+
+    @property
+    def icon(self):
+        return self.attributeIcon
+
+
+class CompletionPopup(object):
+    _WIDTH = 300
+    _HEIGHT = 200
+
+    def __init__(self, parent):
+        self._window = Gtk.Window.new(Gtk.WindowType.POPUP)
+        self._window.set_transient_for(parent)
+
+        # liststore contains: markup, completion inst, icon
+        self._liststore = Gtk.ListStore(str, object, GdkPixbuf.Pixbuf)
+        self._treeview = Gtk.TreeView(model=self._liststore)
+
+        column = Gtk.TreeViewColumn()
+        pixbuf_renderer = Gtk.CellRendererPixbuf()
+        column.pack_start(pixbuf_renderer, False)
+        column.add_attribute(pixbuf_renderer, "pixbuf", 2)
+
+        text_renderer = Gtk.CellRendererText()
+        column.pack_start(text_renderer, True)
+        column.add_attribute(text_renderer, "markup", 0)
+
+        self._treeview.append_column(column)
+
+        self._treeview.set_enable_search(False)
+        self._treeview.set_headers_visible(False)
+
+        scr = Gtk.ScrolledWindow()
+        scr.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scr.add(self._treeview)
+        scr.set_size_request(self._WIDTH, self._HEIGHT)
+
+        frame = Gtk.Frame()
+        frame.set_shadow_type(Gtk.ShadowType.OUT)
+        frame.add(scr)
+
+        self._window.add(frame)
+
+        self._visible = False
+
+    def move(self, x, y):
+        self._window.move(x, y)
+
+    def show(self):
+        self._window.show_all()
+        self._visible = True
+
+    def hide(self):
+        self._window.hide()
+        self._visible = False
+
+    @property
+    def visible(self):
+        return self._visible
+
+    def get_selected(self):
+        """Return the index of the selected row.
+        """
+        selection = self._treeview.get_selection()
+        return selection.get_selected_rows()[1][0].get_indices()[0]
+
+    def select_next(self):
+        """Select the next complete word.
+        """
+        row = min(self.get_selected() + 1, len(self._liststore) - 1)
+        selection = self._treeview.get_selection()
+        selection.unselect_all()
+        selection.select_path(row)
+        self._treeview.scroll_to_cell(row)
+
+    def select_previous(self):
+        """Select the previous complete word.
+        """
+        row = max(self.get_selected() - 1, 0)
+        selection = self._treeview.get_selection()
+        selection.unselect_all()
+        selection.select_path(row)
+        self._treeview.scroll_to_cell(row)
+
+    def set_completions(self, completions):
+        """Set the completions to display.
+        """
+        # first completion is the word we're completing
+        if not completions or not len(completions) > 1:
+            return
+        # 'Gtk.Window.resize' followed later by 'Gtk.TreeView.columns_autosize'
+        # will allow the window to either grow or shrink to fit the new data.
+        self._window.resize(1, 1)
+        self._liststore.clear()
+        for jedi_completion in completions:
+            completion = JediCompletion(jedi_completion)
+            self._liststore.append([
+                completion.markup, completion, completion.icon])
+        self._treeview.columns_autosize()
+        self._treeview.get_selection().select_path(0)
 
 
 class JediInstance(object):
@@ -22,6 +146,9 @@ class JediInstance(object):
             self._document.connect('notify', self.on_notify))
         self._handlers.append(
             self._view.connect('key-press-event', self.on_view_keypress))
+        self._handlers.append(
+            self._view.connect('focus-out-event', self.on_view_focus_out))
+        self._completion_window = CompletionPopup(self._window)
 
     def deactivate(self):
         for handler_id in self._handlers[:]:
@@ -40,8 +167,8 @@ class JediInstance(object):
     def on_view_keypress(self, view, event):
         """User pressed a key in the document.
         """
-#        if view != self._view:
-#            raise ValueError("View in signal doesn't match instance!")
+        if view != self._view:
+            raise ValueError("View in signal doesn't match instance!")
         char = unicode(event.string)
         # don't complete when pasting text
         if len(char) > 1:
@@ -49,6 +176,17 @@ class JediInstance(object):
         # only trigger completions on a dot(.)
         if char == u'.':
             self.show_completion()
+            return
+        # close the completions window when pressing ESC
+        if char == u'\x1b':
+            self.hide_completion()
+            return
+        self.update_completion()
+
+    def on_view_focus_out(self, view, event):
+        """This view has lost focus.
+        """
+        self._completion_window.hide()
 
     def selected(self):
         """This instance has just been selected.
@@ -56,10 +194,13 @@ class JediInstance(object):
         # TODO: show completions in a non-annoying manner (wait for ctrl-space?)
         pass
 
+    def _get_insert_iter(self):
+        return self._document.get_iter_at_mark(self._document.get_insert())
+
     def cursor_position(self):
         """Returns the cursor position as a tuple.
         """
-        g_iter = self._document.get_iter_at_mark(self._document.get_insert())
+        g_iter = self._get_insert_iter()
         line = g_iter.get_line() + 1
         col = g_iter.get_line_offset()
         return line, col
@@ -69,7 +210,7 @@ class JediInstance(object):
 
         Convert relative to window if convert_to_window is specified.
         """
-        g_iter = self._document.get_iter_at_mark(self._document.get_insert())
+        g_iter = self._get_insert_iter()
         rect = self._view.get_iter_location(g_iter)
         if convert_to_window:
             x, y = self._view.buffer_to_window_coords(
@@ -106,7 +247,26 @@ class JediInstance(object):
 
         # figure out where to display the completion window
         cursor_x, cursor_y = self.cursor_coords()
+        win = self._view.get_window(Gtk.TextWindowType.WIDGET)
+        ignore, win_x, win_y = win.get_origin()
+        trans_x = win_x + cursor_x
+        location = self._view.get_iter_location(self._get_insert_iter())
+        trans_y = win_y + cursor_y + location.height
+
         # TODO: refine and display completions
+        self._completion_window.set_completions(completions)
+        self._completion_window.move(trans_x, trans_y)
+        self._completion_window.show()
+
+    def update_completion(self):
+        """Update the existing completions.
+        """
+        if not self._completion_window.visible:
+            return
+        self.show_completion()
+
+    def hide_completion(self):
+        self._completion_window.hide()
 
 
 class JediPlugin(GObject.Object, Gedit.WindowActivatable):
